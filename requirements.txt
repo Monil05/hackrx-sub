@@ -8,5 +8,5 @@ langchain-community
 langchain-text-splitters
 google-generativeai
 sentence-transformers
-
+langchain-google-genai
 PyMuPDF  # For PDF reading (fast & compact)
