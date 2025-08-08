@@ -1,61 +1,74 @@
-import os
-from dotenv import load_dotenv
+import requests
+from langchain_community.document_loaders import PyPDFLoader
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, UnstructuredEmailLoader
-from langchain_community.vectorstores import FAISS
-
-load_dotenv()
-
-# Read Gemini API key from environment
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY not set in environment variables.")
+from langchain.vectorstores import FAISS
+import os
+import tempfile
 
 class RAGProcessor:
     def __init__(self):
         self.embeddings = GoogleGenerativeAIEmbeddings(
             model="models/embedding-001",
-            google_api_key=GEMINI_API_KEY  # ✅ Explicitly set API key
+            google_api_key=os.getenv("GEMINI_API_KEY")
         )
-
         self.llm = ChatGoogleGenerativeAI(
-            model="gemini-1.5-pro",
-            temperature=0,
-            google_api_key=GEMINI_API_KEY  # ✅ Explicitly set API key
+            model="gemini-pro",
+            google_api_key=os.getenv("GEMINI_API_KEY"),
+            temperature=0
         )
 
-    def load_document(self, file_path):
-        """Loads document depending on type"""
-        if file_path.endswith(".pdf"):
-            loader = PyPDFLoader(file_path)
-        elif file_path.endswith(".docx"):
-            loader = Docx2txtLoader(file_path)
-        elif file_path.endswith(".eml"):
-            loader = UnstructuredEmailLoader(file_path)
-        else:
-            raise ValueError("Unsupported file type. Supported: PDF, DOCX, EML")
-        return loader.load()
+    def _download_pdf(self, url):
+        """Downloads a PDF from a given URL and returns the local file path."""
+        try:
+            resp = requests.get(url, timeout=15)
+            resp.raise_for_status()
 
-    def process(self, file_path):
-        """Splits, embeds, and stores document in FAISS"""
-        documents = self.load_document(file_path)
+            content_type = resp.headers.get("Content-Type", "").lower()
+            if "pdf" not in content_type:
+                raise ValueError(f"Invalid file type: {content_type}")
 
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=100
-        )
-        chunks = splitter.split_documents(documents)
+            tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+            tmp_file.write(resp.content)
+            tmp_file.close()
+            return tmp_file.name
+        except requests.exceptions.RequestException as e:
+            raise ValueError(f"Error downloading PDF: {str(e)}")
+        except Exception as e:
+            raise ValueError(f"Invalid PDF URL or file: {str(e)}")
 
-        self.vectorstore = FAISS.from_documents(chunks, self.embeddings)
+    def process(self, document_url, questions):
+        """Processes the document URL and answers questions."""
+        try:
+            # Step 1: Download and verify PDF
+            pdf_path = self._download_pdf(document_url)
 
-    def query(self, question):
-        """Retrieves answer from vector store"""
-        retriever = self.vectorstore.as_retriever(search_kwargs={"k": 4})
-        docs = retriever.get_relevant_documents(question)
+            # Step 2: Load and split PDF
+            loader = PyPDFLoader(pdf_path)
+            docs = loader.load()
 
-        context = "\n\n".join([doc.page_content for doc in docs])
-        prompt = f"Answer the following question using the provided context:\n\nContext:\n{context}\n\nQuestion: {question}"
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=1000,
+                chunk_overlap=100
+            )
+            chunks = splitter.split_documents(docs)
 
-        response = self.llm.invoke(prompt)
-        return response.content
+            # Step 3: Embed and store in FAISS
+            vectorstore = FAISS.from_documents(chunks, self.embeddings)
+            retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
+
+            # Step 4: Generate answers
+            answers = []
+            for q in questions:
+                context = retriever.get_relevant_documents(q)
+                context_text = "\n\n".join([c.page_content for c in context])
+                prompt = f"Context:\n{context_text}\n\nQuestion: {q}\nAnswer:"
+                ans = self.llm.invoke(prompt)
+                answers.append(ans.content.strip())
+
+            return {"answers": answers}
+
+        except ValueError as e:
+            return {"error": str(e)}
+        except Exception as e:
+            return {"error": f"Unexpected error: {str(e)}"}
