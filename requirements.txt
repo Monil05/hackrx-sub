@@ -1,8 +1,12 @@
 flask
 python-dotenv
 requests
-langchain==0.2.6
-langchain-community==0.2.6
-langchain-google-genai==0.0.8
-google-generativeai
+PyPDF2
+python-docx
+beautifulsoup4
+langchain-core
+langchain-text-splitters
+langchain-google-genai
+sentence-transformers
 faiss-cpu==1.7.4
+numpy
