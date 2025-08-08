@@ -1,27 +1,12 @@
-# Core Flask
 Flask==2.3.3
-
-# LangChain essentials (minimal)
 langchain-core==0.1.52
 langchain-community==0.0.38
 langchain-text-splitters==0.0.1
 langchain-google-genai==1.0.1
-
-# Document processing - lightweight versions
-PyPDF2==3.0.1
+pypdf2==3.0.1
 python-docx==0.8.11
-email-parser==0.1.0
-
-# Embeddings (lightweight)
 sentence-transformers==2.2.2
-torch==2.1.0+cpu -f https://download.pytorch.org/whl/torch_stable.html
 faiss-cpu==1.7.4
-
-# HTTP requests
 requests==2.31.0
-
-# Environment
 python-dotenv==1.0.0
-
-# Utilities
 beautifulsoup4==4.12.2

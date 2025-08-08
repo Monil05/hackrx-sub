@@ -1,5 +1,4 @@
 import os
-import tempfile
 import requests
 import gc
 from typing import List
@@ -10,9 +9,23 @@ import io
 import numpy as np
 
 # Lightweight document processing
-import PyPDF2
-from docx import Document as DocxDocument
-from bs4 import BeautifulSoup
+try:
+    import PyPDF2
+    PDF_AVAILABLE = True
+except ImportError:
+    PDF_AVAILABLE = False
+
+try:
+    from docx import Document as DocxDocument
+    DOCX_AVAILABLE = True
+except ImportError:
+    DOCX_AVAILABLE = False
+
+try:
+    from bs4 import BeautifulSoup
+    BS4_AVAILABLE = True
+except ImportError:
+    BS4_AVAILABLE = False
 
 # LangChain essentials
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -20,7 +33,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.documents import Document
 
-# Vector storage - try FAISS first, fallback to InMemory
+# Vector storage - try FAISS first, fallback to simple search
 try:
     from sentence_transformers import SentenceTransformer
     import faiss
@@ -30,15 +43,25 @@ except ImportError:
 
 
 class SimpleEmbeddings:
-    """Lightweight embedding class using sentence-transformers directly"""
+    """Lightweight embedding class"""
     def __init__(self):
-        self.model = SentenceTransformer('all-MiniLM-L6-v2')
+        if FAISS_AVAILABLE:
+            self.model = SentenceTransformer('all-MiniLM-L6-v2')
+        else:
+            self.model = None
     
     def embed_documents(self, texts):
-        return self.model.encode(texts, convert_to_tensor=False).tolist()
+        if self.model:
+            return self.model.encode(texts, convert_to_tensor=False).tolist()
+        else:
+            # Fallback: return dummy embeddings
+            return [[0.0] * 384 for _ in texts]
     
     def embed_query(self, text):
-        return self.model.encode([text], convert_to_tensor=False)[0].tolist()
+        if self.model:
+            return self.model.encode([text], convert_to_tensor=False)[0].tolist()
+        else:
+            return [0.0] * 384
 
 
 class RAGProcessor:
@@ -98,6 +121,9 @@ Answer:"""
 
     def _extract_text_from_pdf(self, file_content: bytes) -> str:
         """Extract text from PDF bytes"""
+        if not PDF_AVAILABLE:
+            raise Exception("PyPDF2 not available for PDF processing")
+        
         try:
             pdf_file = io.BytesIO(file_content)
             pdf_reader = PyPDF2.PdfReader(pdf_file)
@@ -110,6 +136,9 @@ Answer:"""
 
     def _extract_text_from_docx(self, file_content: bytes) -> str:
         """Extract text from DOCX bytes"""
+        if not DOCX_AVAILABLE:
+            raise Exception("python-docx not available for DOCX processing")
+        
         try:
             docx_file = io.BytesIO(file_content)
             doc = DocxDocument(docx_file)
@@ -137,7 +166,7 @@ Answer:"""
                         payload = part.get_payload(decode=True)
                         if payload:
                             text += payload.decode('utf-8', errors='ignore')
-                    elif part.get_content_type() == "text/html":
+                    elif part.get_content_type() == "text/html" and BS4_AVAILABLE:
                         payload = part.get_payload(decode=True)
                         if payload:
                             soup = BeautifulSoup(payload, 'html.parser')
