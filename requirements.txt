@@ -7,19 +7,21 @@ langchain-community==0.0.38
 langchain-text-splitters==0.0.1
 langchain-google-genai==1.0.1
 
-# Document processing
-pypdf==3.17.1
-docx2txt==0.8
-unstructured[local-inference]==0.11.8
-python-magic-bin==0.4.14  # For Windows compatibility
+# Document processing - lightweight versions
+PyPDF2==3.0.1
+python-docx==0.8.11
+email-parser==0.1.0
 
 # Embeddings (lightweight)
 sentence-transformers==2.2.2
-torch==2.1.0 --index-url https://download.pytorch.org/whl/cpu  # CPU-only PyTorch
-faiss-cpu==1.7.4  # More memory-efficient than InMemoryVectorStore
+torch==2.1.0+cpu -f https://download.pytorch.org/whl/torch_stable.html
+faiss-cpu==1.7.4
 
 # HTTP requests
 requests==2.31.0
 
 # Environment
 python-dotenv==1.0.0
+
+# Utilities
+beautifulsoup4==4.12.2

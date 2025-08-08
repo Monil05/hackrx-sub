@@ -3,26 +3,42 @@ import tempfile
 import requests
 import gc
 from typing import List
-import mimetypes
+import email
+from email.parser import BytesParser
+from email.policy import default
+import io
+import numpy as np
 
-# Document loaders
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_community.document_loaders import Docx2txtLoader
-from langchain_community.document_loaders import UnstructuredEmailLoader
+# Lightweight document processing
+import PyPDF2
+from docx import Document as DocxDocument
+from bs4 import BeautifulSoup
 
-# Lightweight embeddings and text splitter
+# LangChain essentials
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.documents import Document
 
-# Simple FAISS for vector storage (more memory efficient)
+# Vector storage - try FAISS first, fallback to InMemory
 try:
-    from langchain_community.vectorstores import FAISS
-    from langchain_community.embeddings import HuggingFaceEmbeddings
+    from sentence_transformers import SentenceTransformer
+    import faiss
     FAISS_AVAILABLE = True
 except ImportError:
-    from langchain_core.vectorstores import InMemoryVectorStore
     FAISS_AVAILABLE = False
+
+
+class SimpleEmbeddings:
+    """Lightweight embedding class using sentence-transformers directly"""
+    def __init__(self):
+        self.model = SentenceTransformer('all-MiniLM-L6-v2')
+    
+    def embed_documents(self, texts):
+        return self.model.encode(texts, convert_to_tensor=False).tolist()
+    
+    def embed_query(self, text):
+        return self.model.encode([text], convert_to_tensor=False)[0].tolist()
 
 
 class RAGProcessor:
@@ -52,130 +68,178 @@ Answer:"""
         return self.llm
 
     def _get_embeddings(self):
-        """Lazy load embeddings with smallest model"""
+        """Lazy load embeddings with lightweight model"""
         if self.embeddings is None:
-            # Use smallest possible embedding model
-            self.embeddings = HuggingFaceEmbeddings(
-                model_name="sentence-transformers/all-MiniLM-L6-v2",
-                model_kwargs={'device': 'cpu'},  # Force CPU to save GPU memory
-                encode_kwargs={'batch_size': 8}   # Small batch size
-            )
+            self.embeddings = SimpleEmbeddings()
         return self.embeddings
 
     def _detect_file_type(self, url: str) -> str:
-        """Detect file type from URL or download a small chunk"""
-        # Try to guess from URL first
-        mime_type, _ = mimetypes.guess_type(url)
-        if mime_type:
-            if 'pdf' in mime_type:
-                return 'pdf'
-            elif 'word' in mime_type or 'docx' in mime_type:
-                return 'docx'
-            elif 'email' in mime_type or url.endswith('.eml'):
-                return 'eml'
+        """Detect file type from URL"""
+        url_lower = url.lower()
+        if '.pdf' in url_lower or 'pdf' in url_lower:
+            return 'pdf'
+        elif '.docx' in url_lower or 'word' in url_lower:
+            return 'docx'
+        elif '.eml' in url_lower or 'email' in url_lower:
+            return 'eml'
         
-        # If unclear, download first few bytes to check
+        # Try to check content-type header
         try:
-            response = requests.get(url, headers={'Range': 'bytes=0-1023'}, timeout=10)
-            content = response.content
-            if content.startswith(b'%PDF'):
+            response = requests.head(url, timeout=5)
+            content_type = response.headers.get('content-type', '').lower()
+            if 'pdf' in content_type:
                 return 'pdf'
-            elif b'PK' in content[:4]:  # ZIP-based formats like DOCX
+            elif 'word' in content_type or 'docx' in content_type:
                 return 'docx'
-            elif b'Return-Path:' in content or b'Message-ID:' in content:
-                return 'eml'
         except:
             pass
         
         return 'pdf'  # Default assumption
 
-    def _download_file(self, url: str) -> str:
-        """Download file to temporary location"""
-        file_type = self._detect_file_type(url)
-        suffix_map = {'pdf': '.pdf', 'docx': '.docx', 'eml': '.eml'}
-        
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix_map.get(file_type, '.pdf')) as tmp_file:
-            response = requests.get(url, timeout=30)
-            if response.status_code != 200:
-                raise Exception(f"Failed to download file: {response.status_code}")
-            tmp_file.write(response.content)
-            return tmp_file.name, file_type
-
-    def _load_document(self, file_path: str, file_type: str):
-        """Load document based on file type"""
+    def _extract_text_from_pdf(self, file_content: bytes) -> str:
+        """Extract text from PDF bytes"""
         try:
-            if file_type == 'pdf':
-                loader = PyPDFLoader(file_path)
-            elif file_type == 'docx':
-                loader = Docx2txtLoader(file_path)
-            elif file_type == 'eml':
-                loader = UnstructuredEmailLoader(file_path)
-            else:
-                # Fallback to PDF
-                loader = PyPDFLoader(file_path)
-            
-            return loader.load()
+            pdf_file = io.BytesIO(file_content)
+            pdf_reader = PyPDF2.PdfReader(pdf_file)
+            text = ""
+            for page in pdf_reader.pages:
+                text += page.extract_text() + "\n"
+            return text.strip()
         except Exception as e:
-            # If specific loader fails, try text extraction
+            raise Exception(f"Error extracting PDF text: {str(e)}")
+
+    def _extract_text_from_docx(self, file_content: bytes) -> str:
+        """Extract text from DOCX bytes"""
+        try:
+            docx_file = io.BytesIO(file_content)
+            doc = DocxDocument(docx_file)
+            text = ""
+            for paragraph in doc.paragraphs:
+                text += paragraph.text + "\n"
+            return text.strip()
+        except Exception as e:
+            raise Exception(f"Error extracting DOCX text: {str(e)}")
+
+    def _extract_text_from_eml(self, file_content: bytes) -> str:
+        """Extract text from EML bytes"""
+        try:
+            msg = BytesParser(policy=default).parsebytes(file_content)
+            text = ""
+            
+            # Get subject
+            if msg['Subject']:
+                text += f"Subject: {msg['Subject']}\n\n"
+            
+            # Extract body
+            if msg.is_multipart():
+                for part in msg.walk():
+                    if part.get_content_type() == "text/plain":
+                        payload = part.get_payload(decode=True)
+                        if payload:
+                            text += payload.decode('utf-8', errors='ignore')
+                    elif part.get_content_type() == "text/html":
+                        payload = part.get_payload(decode=True)
+                        if payload:
+                            soup = BeautifulSoup(payload, 'html.parser')
+                            text += soup.get_text()
+            else:
+                payload = msg.get_payload(decode=True)
+                if payload:
+                    text += payload.decode('utf-8', errors='ignore')
+            
+            return text.strip()
+        except Exception as e:
+            raise Exception(f"Error extracting EML text: {str(e)}")
+
+    def _download_and_extract_text(self, url: str) -> str:
+        """Download file from URL and extract text"""
+        file_type = self._detect_file_type(url)
+        
+        # Download file content
+        response = requests.get(url, timeout=30)
+        if response.status_code != 200:
+            raise Exception(f"Failed to download file: {response.status_code}")
+        
+        file_content = response.content
+        
+        # Extract text based on file type
+        if file_type == 'pdf':
+            return self._extract_text_from_pdf(file_content)
+        elif file_type == 'docx':
+            return self._extract_text_from_docx(file_content)
+        elif file_type == 'eml':
+            return self._extract_text_from_eml(file_content)
+        else:
+            # Try PDF as fallback
             try:
-                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read()
-                from langchain_core.documents import Document
-                return [Document(page_content=content)]
+                return self._extract_text_from_pdf(file_content)
             except:
-                raise Exception(f"Could not load document: {str(e)}")
+                # If all fails, try to decode as text
+                return file_content.decode('utf-8', errors='ignore')
 
     def process_document_from_url(self, doc_url: str, questions: List[str]) -> List[str]:
-        temp_file = None
         try:
-            # === Step 1: Download file ===
-            temp_file, file_type = self._download_file(doc_url)
+            # === Step 1: Download and extract text ===
+            document_text = self._download_and_extract_text(doc_url)
+            
+            if not document_text.strip():
+                raise Exception("No text could be extracted from the document")
 
-            # === Step 2: Load document ===
-            docs = self._load_document(temp_file, file_type)
-
-            # === Step 3: Split into smaller chunks to save memory ===
+            # === Step 2: Split into chunks ===
             splitter = RecursiveCharacterTextSplitter(
-                chunk_size=400,      # Smaller chunks
-                chunk_overlap=50,    # Smaller overlap
+                chunk_size=400,
+                chunk_overlap=50,
                 length_function=len
             )
-            pages = splitter.split_documents(docs)
             
+            # Create document objects
+            docs = [Document(page_content=document_text)]
+            chunks = splitter.split_documents(docs)
+            
+            if not chunks:
+                raise Exception("Document could not be split into chunks")
+
             # Clear original docs to free memory
-            del docs
+            del docs, document_text
             gc.collect()
 
-            # === Step 4: Create vector store (memory efficient) ===
+            # === Step 3: Create vector store ===
             embeddings = self._get_embeddings()
             
+            # Extract texts for embedding
+            texts = [chunk.page_content for chunk in chunks]
+            
             if FAISS_AVAILABLE:
-                # FAISS is more memory efficient for larger datasets
-                vector_store = FAISS.from_documents(pages, embeddings)
-                retriever = vector_store.as_retriever(
-                    search_kwargs={"k": 3}  # Retrieve fewer documents
-                )
+                # Create FAISS index
+                embeddings_vectors = embeddings.embed_documents(texts)
+                dimension = len(embeddings_vectors[0])
+                index = faiss.IndexFlatL2(dimension)
+                index.add(np.array(embeddings_vectors, dtype=np.float32))
+                
+                # Store texts with index
+                self.chunk_texts = texts
+                self.faiss_index = index
+                
             else:
-                from langchain_core.vectorstores import InMemoryVectorStore
-                vector_store = InMemoryVectorStore.from_documents(pages, embeddings)
-                retriever = vector_store.as_retriever(search_kwargs={"k": 3})
+                # Fallback - just store chunks for simple retrieval
+                self.chunk_texts = texts
 
-            # Clear pages to free memory
-            del pages
+            # Clear chunks to free memory
+            del chunks, texts
             gc.collect()
 
-            # === Step 5: Process questions ===
+            # === Step 4: Process questions ===
             llm = self._get_llm()
             parser = StrOutputParser()
             
             answers = []
             for question in questions:
                 try:
-                    # Get relevant documents
-                    relevant_docs = retriever.invoke(question)
-                    
-                    # Format context
-                    context = "\n\n".join([doc.page_content for doc in relevant_docs])
+                    # Get relevant context
+                    if FAISS_AVAILABLE:
+                        context = self._get_relevant_context_faiss(question, k=3)
+                    else:
+                        context = self._get_relevant_context_simple(question, k=3)
                     
                     # Create prompt
                     prompt = self.prompt_template.format(context=context, question=question)
@@ -193,13 +257,52 @@ Answer:"""
 
             return answers
 
-        finally:
-            # Clean up temp file
-            if temp_file and os.path.exists(temp_file):
-                try:
-                    os.unlink(temp_file)
-                except:
-                    pass
+        except Exception as e:
+            raise Exception(f"Error processing document: {str(e)}")
+
+    def _get_relevant_context_faiss(self, question: str, k: int = 3) -> str:
+        """Get relevant context using FAISS"""
+        try:
+            # Embed the question
+            question_embedding = self.embeddings.embed_query(question)
             
-            # Force final garbage collection
-            gc.collect()
+            # Search FAISS index
+            distances, indices = self.faiss_index.search(
+                np.array([question_embedding], dtype=np.float32), k
+            )
+            
+            # Get relevant texts
+            relevant_texts = [self.chunk_texts[idx] for idx in indices[0] if idx < len(self.chunk_texts)]
+            return "\n\n".join(relevant_texts)
+            
+        except Exception:
+            # Fallback to first few chunks
+            return "\n\n".join(self.chunk_texts[:k])
+
+    def _get_relevant_context_simple(self, question: str, k: int = 3) -> str:
+        """Simple keyword-based context retrieval"""
+        try:
+            # Simple keyword matching
+            question_lower = question.lower()
+            question_words = set(question_lower.split())
+            
+            # Score chunks based on keyword overlap
+            scored_chunks = []
+            for i, chunk in enumerate(self.chunk_texts):
+                chunk_lower = chunk.lower()
+                chunk_words = set(chunk_lower.split())
+                overlap = len(question_words.intersection(chunk_words))
+                scored_chunks.append((overlap, i, chunk))
+            
+            # Sort by score and take top k
+            scored_chunks.sort(reverse=True, key=lambda x: x[0])
+            relevant_chunks = [chunk for _, _, chunk in scored_chunks[:k]]
+            
+            if not relevant_chunks:
+                relevant_chunks = self.chunk_texts[:k]
+            
+            return "\n\n".join(relevant_chunks)
+            
+        except Exception:
+            # Ultimate fallback
+            return "\n\n".join(self.chunk_texts[:k])
