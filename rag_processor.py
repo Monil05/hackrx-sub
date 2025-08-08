@@ -8,7 +8,6 @@ from email.policy import default
 import io
 import numpy as np
 
-# Lightweight document processing
 try:
     import PyPDF2
     PDF_AVAILABLE = True
@@ -27,13 +26,11 @@ try:
 except ImportError:
     BS4_AVAILABLE = False
 
-# LangChain essentials
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.documents import Document
 
-# Vector storage - try FAISS first, fallback to simple search
 try:
     from sentence_transformers import SentenceTransformer
     import faiss
@@ -43,7 +40,6 @@ except ImportError:
 
 
 class SimpleEmbeddings:
-    """Lightweight embedding class"""
     def __init__(self):
         if FAISS_AVAILABLE:
             self.model = SentenceTransformer('all-MiniLM-L6-v2')
@@ -53,26 +49,20 @@ class SimpleEmbeddings:
     def embed_documents(self, texts):
         if self.model:
             return self.model.encode(texts, convert_to_tensor=False).tolist()
-        else:
-            # Fallback: return dummy embeddings
-            return [[0.0] * 384 for _ in texts]
+        return [[0.0] * 384 for _ in texts]
     
     def embed_query(self, text):
         if self.model:
             return self.model.encode([text], convert_to_tensor=False)[0].tolist()
-        else:
-            return [0.0] * 384
+        return [0.0] * 384
 
 
 class RAGProcessor:
     def __init__(self, api_key: str):
         self.api_key = api_key
-        self.llm = None  # Lazy load
-        self.embeddings = None  # Lazy load
-        
-        # Simple RAG prompt template
-        self.prompt_template = """You are an assistant for question-answering tasks. Use the following pieces of retrieved context to answer the question. If you don't know the answer, just say that you don't know. Keep the answer concise and accurate.
-
+        self.llm = None
+        self.embeddings = None
+        self.prompt_template = """You are an assistant for question-answering tasks...
 Context:
 {context}
 
@@ -81,85 +71,64 @@ Question: {question}
 Answer:"""
 
     def _get_llm(self):
-        """Lazy load LLM to save memory"""
         if self.llm is None:
             self.llm = ChatGoogleGenerativeAI(
-                model="gemini-1.5-flash",  # Faster and cheaper than gemini-pro
+                model="gemini-1.5-flash",
                 google_api_key=self.api_key,
                 temperature=0.1
             )
         return self.llm
 
     def _get_embeddings(self):
-        """Lazy load embeddings with lightweight model"""
         if self.embeddings is None:
             self.embeddings = SimpleEmbeddings()
         return self.embeddings
 
     def _detect_file_type(self, url: str) -> str:
-        """Detect file type from URL"""
         url_lower = url.lower()
-        if '.pdf' in url_lower or 'pdf' in url_lower:
+        if '.pdf' in url_lower:
             return 'pdf'
-        elif '.docx' in url_lower or 'word' in url_lower:
+        elif '.docx' in url_lower:
             return 'docx'
-        elif '.eml' in url_lower or 'email' in url_lower:
+        elif '.eml' in url_lower:
             return 'eml'
-        
-        # Try to check content-type header
         try:
             response = requests.head(url, timeout=5)
-            content_type = response.headers.get('content-type', '').lower()
-            if 'pdf' in content_type:
+            ctype = response.headers.get('content-type', '').lower()
+            if 'pdf' in ctype:
                 return 'pdf'
-            elif 'word' in content_type or 'docx' in content_type:
+            elif 'word' in ctype or 'docx' in ctype:
                 return 'docx'
         except:
             pass
-        
-        return 'pdf'  # Default assumption
+        return 'pdf'
 
     def _extract_text_from_pdf(self, file_content: bytes) -> str:
-        """Extract text from PDF bytes"""
         if not PDF_AVAILABLE:
-            raise Exception("PyPDF2 not available for PDF processing")
-        
+            raise Exception("PyPDF2 not available")
         try:
             pdf_file = io.BytesIO(file_content)
             pdf_reader = PyPDF2.PdfReader(pdf_file)
-            text = ""
-            for page in pdf_reader.pages:
-                text += page.extract_text() + "\n"
-            return text.strip()
+            return "\n".join(page.extract_text() for page in pdf_reader.pages)
         except Exception as e:
-            raise Exception(f"Error extracting PDF text: {str(e)}")
+            raise Exception(f"Error extracting PDF text: {e}")
 
     def _extract_text_from_docx(self, file_content: bytes) -> str:
-        """Extract text from DOCX bytes"""
         if not DOCX_AVAILABLE:
-            raise Exception("python-docx not available for DOCX processing")
-        
+            raise Exception("python-docx not available")
         try:
             docx_file = io.BytesIO(file_content)
             doc = DocxDocument(docx_file)
-            text = ""
-            for paragraph in doc.paragraphs:
-                text += paragraph.text + "\n"
-            return text.strip()
+            return "\n".join(p.text for p in doc.paragraphs)
         except Exception as e:
-            raise Exception(f"Error extracting DOCX text: {str(e)}")
+            raise Exception(f"Error extracting DOCX text: {e}")
 
     def _extract_text_from_eml(self, file_content: bytes) -> str:
-        """Extract text from EML bytes"""
         try:
             msg = BytesParser(policy=default).parsebytes(file_content)
             text = ""
-            
-            # Get subject
             if msg['Subject']:
                 text += f"Subject: {msg['Subject']}\n\n"
-            
-            # Extract body
             if msg.is_multipart():
                 for part in msg.walk():
                     if part.get_content_type() == "text/plain":
@@ -175,163 +144,74 @@ Answer:"""
                 payload = msg.get_payload(decode=True)
                 if payload:
                     text += payload.decode('utf-8', errors='ignore')
-            
             return text.strip()
         except Exception as e:
-            raise Exception(f"Error extracting EML text: {str(e)}")
+            raise Exception(f"Error extracting EML text: {e}")
 
     def _download_and_extract_text(self, url: str) -> str:
-        """Download file from URL and extract text"""
-        file_type = self._detect_file_type(url)
-        
-        # Download file content
-        response = requests.get(url, timeout=30)
-        if response.status_code != 200:
-            raise Exception(f"Failed to download file: {response.status_code}")
-        
-        file_content = response.content
-        
-        # Extract text based on file type
-        if file_type == 'pdf':
-            return self._extract_text_from_pdf(file_content)
-        elif file_type == 'docx':
-            return self._extract_text_from_docx(file_content)
-        elif file_type == 'eml':
-            return self._extract_text_from_eml(file_content)
-        else:
-            # Try PDF as fallback
-            try:
-                return self._extract_text_from_pdf(file_content)
-            except:
-                # If all fails, try to decode as text
-                return file_content.decode('utf-8', errors='ignore')
+        ftype = self._detect_file_type(url)
+        resp = requests.get(url, timeout=30)
+        if resp.status_code != 200:
+            raise Exception(f"Failed to download file: {resp.status_code}")
+        content = resp.content
+        if ftype == 'pdf':
+            return self._extract_text_from_pdf(content)
+        elif ftype == 'docx':
+            return self._extract_text_from_docx(content)
+        elif ftype == 'eml':
+            return self._extract_text_from_eml(content)
+        try:
+            return self._extract_text_from_pdf(content)
+        except:
+            return content.decode('utf-8', errors='ignore')
 
     def process_document_from_url(self, doc_url: str, questions: List[str]) -> List[str]:
-        try:
-            # === Step 1: Download and extract text ===
-            document_text = self._download_and_extract_text(doc_url)
-            
-            if not document_text.strip():
-                raise Exception("No text could be extracted from the document")
+        document_text = self._download_and_extract_text(doc_url)
+        if not document_text.strip():
+            raise Exception("No text extracted")
 
-            # === Step 2: Split into chunks ===
-            splitter = RecursiveCharacterTextSplitter(
-                chunk_size=400,
-                chunk_overlap=50,
-                length_function=len
-            )
-            
-            # Create document objects
-            docs = [Document(page_content=document_text)]
-            chunks = splitter.split_documents(docs)
-            
-            if not chunks:
-                raise Exception("Document could not be split into chunks")
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=400,
+            chunk_overlap=50,
+            length_function=len
+        )
+        docs = [Document(page_content=document_text)]
+        chunks = splitter.split_documents(docs)
 
-            # Clear original docs to free memory
-            del docs, document_text
-            gc.collect()
+        embeddings = self._get_embeddings()
+        texts = [c.page_content for c in chunks]
+        if FAISS_AVAILABLE:
+            vectors = embeddings.embed_documents(texts)
+            dim = len(vectors[0])
+            index = faiss.IndexFlatL2(dim)
+            index.add(np.array(vectors, dtype=np.float32))
+            self.chunk_texts = texts
+            self.faiss_index = index
+        else:
+            self.chunk_texts = texts
 
-            # === Step 3: Create vector store ===
-            embeddings = self._get_embeddings()
-            
-            # Extract texts for embedding
-            texts = [chunk.page_content for chunk in chunks]
-            
+        llm = self._get_llm()
+        parser = StrOutputParser()
+        answers = []
+        for q in questions:
             if FAISS_AVAILABLE:
-                # Create FAISS index
-                embeddings_vectors = embeddings.embed_documents(texts)
-                dimension = len(embeddings_vectors[0])
-                index = faiss.IndexFlatL2(dimension)
-                index.add(np.array(embeddings_vectors, dtype=np.float32))
-                
-                # Store texts with index
-                self.chunk_texts = texts
-                self.faiss_index = index
-                
+                context = self._get_relevant_context_faiss(q, k=3)
             else:
-                # Fallback - just store chunks for simple retrieval
-                self.chunk_texts = texts
+                context = self._get_relevant_context_simple(q, k=3)
+            prompt = self.prompt_template.format(context=context, question=q)
+            response = llm.invoke(prompt)
+            answers.append(parser.invoke(response).strip())
+        return answers
 
-            # Clear chunks to free memory
-            del chunks, texts
-            gc.collect()
+    def _get_relevant_context_faiss(self, question: str, k=3) -> str:
+        qvec = self.embeddings.embed_query(question)
+        distances, indices = self.faiss_index.search(
+            np.array([qvec], dtype=np.float32), k
+        )
+        return "\n\n".join(self.chunk_texts[idx] for idx in indices[0] if idx < len(self.chunk_texts))
 
-            # === Step 4: Process questions ===
-            llm = self._get_llm()
-            parser = StrOutputParser()
-            
-            answers = []
-            for question in questions:
-                try:
-                    # Get relevant context
-                    if FAISS_AVAILABLE:
-                        context = self._get_relevant_context_faiss(question, k=3)
-                    else:
-                        context = self._get_relevant_context_simple(question, k=3)
-                    
-                    # Create prompt
-                    prompt = self.prompt_template.format(context=context, question=question)
-                    
-                    # Get answer
-                    response = llm.invoke(prompt)
-                    answer = parser.invoke(response)
-                    answers.append(answer.strip())
-                    
-                    # Force garbage collection between questions
-                    gc.collect()
-                    
-                except Exception as e:
-                    answers.append(f"Error processing question: {str(e)}")
-
-            return answers
-
-        except Exception as e:
-            raise Exception(f"Error processing document: {str(e)}")
-
-    def _get_relevant_context_faiss(self, question: str, k: int = 3) -> str:
-        """Get relevant context using FAISS"""
-        try:
-            # Embed the question
-            question_embedding = self.embeddings.embed_query(question)
-            
-            # Search FAISS index
-            distances, indices = self.faiss_index.search(
-                np.array([question_embedding], dtype=np.float32), k
-            )
-            
-            # Get relevant texts
-            relevant_texts = [self.chunk_texts[idx] for idx in indices[0] if idx < len(self.chunk_texts)]
-            return "\n\n".join(relevant_texts)
-            
-        except Exception:
-            # Fallback to first few chunks
-            return "\n\n".join(self.chunk_texts[:k])
-
-    def _get_relevant_context_simple(self, question: str, k: int = 3) -> str:
-        """Simple keyword-based context retrieval"""
-        try:
-            # Simple keyword matching
-            question_lower = question.lower()
-            question_words = set(question_lower.split())
-            
-            # Score chunks based on keyword overlap
-            scored_chunks = []
-            for i, chunk in enumerate(self.chunk_texts):
-                chunk_lower = chunk.lower()
-                chunk_words = set(chunk_lower.split())
-                overlap = len(question_words.intersection(chunk_words))
-                scored_chunks.append((overlap, i, chunk))
-            
-            # Sort by score and take top k
-            scored_chunks.sort(reverse=True, key=lambda x: x[0])
-            relevant_chunks = [chunk for _, _, chunk in scored_chunks[:k]]
-            
-            if not relevant_chunks:
-                relevant_chunks = self.chunk_texts[:k]
-            
-            return "\n\n".join(relevant_chunks)
-            
-        except Exception:
-            # Ultimate fallback
-            return "\n\n".join(self.chunk_texts[:k])
+    def _get_relevant_context_simple(self, question: str, k=3) -> str:
+        q_words = set(question.lower().split())
+        scored = [(len(q_words & set(c.lower().split())), i, c) for i, c in enumerate(self.chunk_texts)]
+        scored.sort(reverse=True, key=lambda x: x[0])
+        return "\n\n".join(c for _, _, c in scored[:k]) or "\n\n".join(self.chunk_texts[:k])
