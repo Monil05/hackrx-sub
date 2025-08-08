@@ -1,46 +1,41 @@
-from flask import Flask, request, jsonify
-from rag_processor import RAGProcessor
 import os
+from flask import Flask, request, jsonify
+from dotenv import load_dotenv
+from rag_processor import RAGProcessor
+
+# Load environment variables
+load_dotenv()
+
+AUTH_TOKEN = os.getenv("AUTH_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 app = Flask(__name__)
 
-# Load environment variables
-API_KEY = os.getenv("GEMINI_API_KEY")
-AUTH_TOKEN = os.getenv("AUTH_TOKEN")
+# Initialize RAG processor
+rag = RAGProcessor(GEMINI_API_KEY)
 
-# Lazy-load processor
-processor = None
-def get_processor():
-    global processor
-    if processor is None:
-        processor = RAGProcessor(API_KEY)
-    return processor
 
 @app.route("/hackrx/run", methods=["POST"])
 def run_rag():
-    # Auth check
+    # Authentication
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer ") or auth_header.split(" ")[1] != AUTH_TOKEN:
         return jsonify({"error": "Unauthorized"}), 401
 
-    # Input parsing
     data = request.get_json()
-    doc_url = data.get("documents")
-    questions = data.get("questions")
-    if not doc_url or not questions:
-        return jsonify({"error": "Missing document URL or questions"}), 400
+
+    if not data or "documents" not in data or "questions" not in data:
+        return jsonify({"error": "Invalid request format"}), 400
+
+    document_url = data["documents"]
+    questions = data["questions"]
 
     try:
-        proc = get_processor()
-        answers = proc.process_document_from_url(doc_url, questions)
+        answers = rag.process(document_url, questions)
         return jsonify({"answers": answers})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/", methods=["GET"])
-def home():
-    return "HackRx Webhook is live."
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=5000)
