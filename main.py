@@ -13,14 +13,6 @@ AUTH_TOKEN = os.getenv("AUTH_TOKEN")
 @app.route("/hackrx/run", methods=["POST"])
 def hackrx_run():
     try:
-        # Check Bearer token
-        auth_header = request.headers.get("Authorization", "")
-        if not auth_header.startswith("Bearer "):
-            return jsonify({"error": "Missing or invalid Authorization header"}), 401
-        token = auth_header.split("Bearer ")[1].strip()
-        if token != AUTH_TOKEN:
-            return jsonify({"error": "Unauthorized"}), 401
-
         data = request.get_json()
         doc_url = data.get("documents")
         questions = data.get("questions")
