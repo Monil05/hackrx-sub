@@ -4,6 +4,7 @@ python-dotenv==1.0.1
 requests==2.32.3
 PyPDF2==3.0.1
 faiss-cpu==1.8.0
+<<<<<<< HEAD
 langchain==0.2.6
 langchain-google-genai==2.1.9
 langchain-community==0.2.6
@@ -24,3 +25,10 @@ numpy
 requests
 scikit-learn
 >>>>>>> 75959a6 (update)
+=======
+langchain==0.1.20
+langchain-google-genai==0.0.9
+langchain-community==0.0.38
+langchain-core==0.1.52
+langchain-text-splitters==0.0.1
+>>>>>>> e3a8499d01d73d8bb3255f6c99a74cea31e578b3
