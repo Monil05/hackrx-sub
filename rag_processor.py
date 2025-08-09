@@ -1,6 +1,7 @@
 import os
 import tempfile
 import requests
+import gc
 from pypdf import PdfReader
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -19,7 +20,7 @@ class RAGProcessor:
         )
 
         self.llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
+            model="gemini-1.5-flash",
             temperature=0.3,
             google_api_key=os.getenv("GEMINI_API_KEY")
         )
@@ -48,8 +49,8 @@ class RAGProcessor:
 
     def split_text(self, text):
         splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1500,
-            chunk_overlap=300
+            chunk_size=800,
+            chunk_overlap=100
         )
         docs = splitter.split_text(text)
         return [Document(page_content=chunk) for chunk in docs]
@@ -68,7 +69,7 @@ class RAGProcessor:
             'texts': doc_texts
         }
 
-    def retrieve_documents(self, vectorstore, query, k=4):
+    def retrieve_documents(self, vectorstore, query, k=2):
         # Get query embedding
         query_embedding = self.embeddings.embed_query(query)
         query_embedding = np.array(query_embedding).reshape(1, -1)
@@ -94,10 +95,10 @@ class RAGProcessor:
         # Step 4: Retrieve and answer
         answers = []
         for q in questions:
-            rel_docs = self.retrieve_documents(vectorstore, q, k=4)
+            rel_docs = self.retrieve_documents(vectorstore, q, k=2)
             context = "\n\n".join([d.page_content for d in rel_docs])
             
-            prompt = f"""Based on the provided document context, answer the question accurately and concisely. If the information is not available in the context, state that clearly.
+            prompt = f"""Based on the provided document context, answer the question accurately and concisely in plain text. Do not use markdown formatting, bullet points, or special characters like ** or ##. Provide a direct, clean answer.
 
 Context:
 {context}
@@ -107,6 +108,16 @@ Question: {q}
 Answer:"""
             
             res = self.llm.predict(prompt)
-            answers.append(res.strip())
+            # Clean up markdown formatting but keep readability
+            clean_answer = res.strip()
+            clean_answer = clean_answer.replace('**', '')  # Remove bold
+            clean_answer = clean_answer.replace('##', '')  # Remove headers
+            clean_answer = clean_answer.replace('\n\n\n', '. ')  # Triple newlines to period+space
+            clean_answer = clean_answer.replace('\n\n', '. ')   # Double newlines to period+space
+            clean_answer = clean_answer.replace('\n', ' ')      # Single newlines to space
+            answers.append(clean_answer)
+            
+            # Force garbage collection to free memory
+            gc.collect()
 
         return answers
