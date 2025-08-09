@@ -3,7 +3,7 @@ python-dotenv==1.0.1
 requests==2.31.0
 PyPDF2==3.0.1
 faiss-cpu==1.8.0
-langchain-google-genai==0.1.6
+langchain-google-genai==1.0.10
 langchain-text-splitters==0.2.2
 langchain-core==0.2.6
 langchain-community==0.2.6
