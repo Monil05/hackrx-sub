@@ -21,7 +21,7 @@ class RAGProcessor:
         )
 
         self.llm = ChatGoogleGenerativeAI(
-            model="gemini-1.5-flash",
+            model="gemini-2.5-flash",
             temperature=0.1,  # Lower temperature for more consistent answers
             google_api_key=os.getenv("GEMINI_API_KEY")
         )
