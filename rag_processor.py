@@ -49,7 +49,7 @@ class RAGProcessor:
 
     def split_text(self, text):
         splitter = RecursiveCharacterTextSplitter(
-            chunk_size=800,
+            chunk_size=1000,
             chunk_overlap=200
         )
         docs = splitter.split_text(text)
