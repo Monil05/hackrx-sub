@@ -4,6 +4,7 @@ import requests
 import gc
 import re
 import unicodedata
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pypdf import PdfReader
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
@@ -23,7 +24,7 @@ class RAGProcessor:
         )
 
         self.llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
+            model="gemini-1.5-flash",
             temperature=0.0,  # Zero temperature for maximum consistency
             google_api_key=os.getenv("GEMINI_API_KEY")
         )
