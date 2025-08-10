@@ -117,7 +117,7 @@ class RAGProcessor:
         doc_texts = [doc.page_content for doc in documents]
         
         # Process in smaller batches to control memory
-        batch_size = 3  # Smaller batches
+        batch_size = 6  # Smaller batches
         doc_embeddings = []
         
         for i in range(0, len(doc_texts), batch_size):
