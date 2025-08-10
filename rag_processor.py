@@ -50,7 +50,7 @@ class RAGProcessor:
     def split_text(self, text):
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=800,
-            chunk_overlap=100
+            chunk_overlap=200
         )
         docs = splitter.split_text(text)
         return [Document(page_content=chunk) for chunk in docs]
