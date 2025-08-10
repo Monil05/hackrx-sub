@@ -3,6 +3,8 @@ import tempfile
 import requests
 import gc
 import re
+import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from pypdf import PdfReader
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -22,18 +24,53 @@ class RAGProcessor:
 
         self.llm = ChatGoogleGenerativeAI(
             model="gemini-2.5-flash",
-            temperature=0.1,  # Lower temperature for more consistent answers
+            temperature=0.2,
             google_api_key=os.getenv("GEMINI_API_KEY")
         )
 
+    def clean_text(self, text):
+        """Comprehensive text cleaning"""
+        # Fix unicode issues
+        text = unicodedata.normalize('NFKD', text)
+        
+        # Replace common unicode characters
+        replacements = {
+            '\u2019': "'",  # Right single quotation mark
+            '\u2018': "'",  # Left single quotation mark  
+            '\u201c': '"',  # Left double quotation mark
+            '\u201d': '"',  # Right double quotation mark
+            '\u2013': '-',  # En dash
+            '\u2014': '-',  # Em dash
+            '\u00a0': ' ',  # Non-breaking space
+            '\u2022': '*',  # Bullet point
+        }
+        
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+        
+        # Remove markdown formatting
+        text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)  # Bold
+        text = re.sub(r'\*([^*]+)\*', r'\1', text)      # Italic
+        text = re.sub(r'#{1,6}\s*', '', text)           # Headers
+        text = re.sub(r'```[^`]*```', '', text)         # Code blocks
+        text = re.sub(r'`([^`]+)`', r'\1', text)        # Inline code
+        
+        # Fix spacing and newlines
+        text = re.sub(r'\n{3,}', '. ', text)           # Multiple newlines
+        text = re.sub(r'\n{2}', '. ', text)            # Double newlines
+        text = re.sub(r'\n', ' ', text)                # Single newlines
+        text = re.sub(r'\s{2,}', ' ', text)            # Multiple spaces
+        
+        # Remove backslashes and clean up
+        text = text.replace('\\', '')
+        text = re.sub(r'[^\w\s\.\,\;\:\!\?\-\'\"]', ' ', text)
+        
+        return text.strip()
+
     def load_pdf_from_url(self, url):
         """Download a PDF from remote URL and return text."""
-        resp = requests.get(url, stream=True, timeout=30)
+        resp = requests.get(url, stream=True, timeout=15)  # Reduced timeout
         resp.raise_for_status()
-
-        content_type = resp.headers.get("Content-Type", "").lower()
-        if "pdf" not in content_type:
-            raise ValueError(f"URL did not return a PDF. Got: {content_type}")
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             tmp.write(resp.content)
@@ -43,69 +80,45 @@ class RAGProcessor:
         reader = PdfReader(tmp_path)
         for page in reader.pages:
             page_text = page.extract_text() or ""
-            # Basic text cleaning
-            page_text = re.sub(r'\s+', ' ', page_text)  # Normalize whitespace
             text += page_text + "\n"
         
-        # Clean up temporary file
         os.unlink(tmp_path)
-        return text.strip()
+        return self.clean_text(text)
 
     def split_text(self, text):
-        # Smart chunking with overlap
         splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1200,  # Slightly larger for better context
-            chunk_overlap=150,  # Optimized overlap
-            separators=["\n\n", "\n", ". ", ".", " ", ""]  # Better splitting
+            chunk_size=1000,
+            chunk_overlap=100,  # Reduced overlap for speed
+            separators=["\n\n", "\n", ". ", ".", " "]
         )
         docs = splitter.split_text(text)
-        return [Document(page_content=chunk.strip()) for chunk in docs if len(chunk.strip()) > 50]
+        return [Document(page_content=chunk.strip()) for chunk in docs if len(chunk.strip()) > 30]
 
-    def create_vectorstore(self, documents):
-        # Batch embedding creation for efficiency
+    def create_vectorstore_parallel(self, documents):
+        """Create embeddings in parallel for speed"""
         doc_texts = [doc.page_content for doc in documents]
         
-        # Create embeddings in smaller batches to save memory
-        batch_size = 10
-        doc_embeddings = []
+        def get_embedding(text):
+            return self.embeddings.embed_query(text)
         
-        for i in range(0, len(doc_texts), batch_size):
-            batch = doc_texts[i:i+batch_size]
-            batch_embeddings = []
-            
-            for text in batch:
-                embedding = self.embeddings.embed_query(text)
-                batch_embeddings.append(embedding)
-            
-            doc_embeddings.extend(batch_embeddings)
-            
-            # Memory cleanup after each batch
-            gc.collect()
+        # Use ThreadPoolExecutor for parallel embedding creation
+        with ThreadPoolExecutor(max_workers=3) as executor:  # Limited workers to control memory
+            doc_embeddings = list(executor.map(get_embedding, doc_texts))
         
         return {
             'documents': documents,
-            'embeddings': np.array(doc_embeddings, dtype=np.float32),  # Use float32 to save memory
+            'embeddings': np.array(doc_embeddings, dtype=np.float32),
             'texts': doc_texts
         }
 
-    def retrieve_documents(self, vectorstore, query, k=3):  # Increased to 3 for better accuracy
-        # Get query embedding
+    def retrieve_documents(self, vectorstore, query, k=2):
         query_embedding = self.embeddings.embed_query(query)
         query_embedding = np.array(query_embedding, dtype=np.float32).reshape(1, -1)
         
-        # Calculate cosine similarities
         similarities = cosine_similarity(query_embedding, vectorstore['embeddings'])[0]
-        
-        # Get top k most similar documents with threshold
         top_indices = np.argsort(similarities)[::-1][:k]
         
-        # Filter out low similarity documents (below 0.3 threshold)
-        relevant_docs = []
-        for idx in top_indices:
-            if similarities[idx] > 0.3:  # Only include relevant docs
-                relevant_docs.append(vectorstore['documents'][idx])
-        
-        return relevant_docs if relevant_docs else [vectorstore['documents'][top_indices[0]]]
+        return [vectorstore['documents'][i] for i in top_indices]
 
     def run_rag(self, doc_url, questions):
         # Step 1: Download and load document
@@ -114,46 +127,31 @@ class RAGProcessor:
         # Step 2: Split into chunks
         docs = self.split_text(text)
 
-        # Step 3: Embed + store (only once for all questions)
-        vectorstore = self.create_vectorstore(docs)
+        # Step 3: Create embeddings in parallel
+        vectorstore = self.create_vectorstore_parallel(docs)
 
-        # Step 4: Retrieve and answer
-        answers = []
-        for q in questions:
-            rel_docs = self.retrieve_documents(vectorstore, q, k=3)
+        # Step 4: Process questions in parallel
+        def process_question(q):
+            rel_docs = self.retrieve_documents(vectorstore, q, k=2)
             context = "\n\n".join([d.page_content for d in rel_docs])
             
-            # Enhanced prompt for better accuracy
-            prompt = f"""You are a precise document analyst. Based ONLY on the provided context, answer the question with specific details from the document. Be direct and factual.
+            # Concise prompt for shorter answers
+            prompt = f"""Based on the document context, provide a direct, concise answer. Use only 1-2 sentences maximum.
 
-If the information is not in the context, respond with "Information not available in the provided document."
-
-Context:
-{context}
+Context: {context}
 
 Question: {q}
 
-Provide a clear, specific answer:"""
+Concise answer:"""
             
             res = self.llm.predict(prompt)
-            
-            # Enhanced text cleaning
-            clean_answer = res.strip()
-            clean_answer = re.sub(r'\*\*([^*]+)\*\*', r'\1', clean_answer)  # Remove bold formatting
-            clean_answer = re.sub(r'#{1,6}\s*', '', clean_answer)  # Remove headers
-            clean_answer = re.sub(r'\n{3,}', '. ', clean_answer)  # Multiple newlines to period
-            clean_answer = re.sub(r'\n{2}', '. ', clean_answer)   # Double newlines to period
-            clean_answer = re.sub(r'\n', ' ', clean_answer)       # Single newlines to space
-            clean_answer = re.sub(r'\s{2,}', ' ', clean_answer)   # Multiple spaces to single
-            clean_answer = clean_answer.strip()
-            
-            answers.append(clean_answer)
-            
-            # Memory cleanup after each question
-            del res, clean_answer
-            gc.collect()
-
-        # Final cleanup
+            return self.clean_text(res)
+        
+        # Process all questions in parallel
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            answers = list(executor.map(process_question, questions))
+        
+        # Cleanup
         del vectorstore
         gc.collect()
         
