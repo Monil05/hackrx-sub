@@ -23,8 +23,8 @@ class RAGProcessor:
         )
 
         self.llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
-            temperature=0.2,
+            model="gemini-1.5-flash",
+            temperature=0.0,  # Zero temperature for maximum consistency
             google_api_key=os.getenv("GEMINI_API_KEY")
         )
 
@@ -104,12 +104,12 @@ class RAGProcessor:
 
     def split_text(self, text):
         splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=100,  # Reduced overlap for speed
+            chunk_size=1500,  # Larger chunks for better context
+            chunk_overlap=200,  # More overlap for continuity
             separators=["\n\n", "\n", ". ", ".", " "]
         )
         docs = splitter.split_text(text)
-        return [Document(page_content=chunk.strip()) for chunk in docs if len(chunk.strip()) > 30]
+        return [Document(page_content=chunk.strip()) for chunk in docs if len(chunk.strip()) > 50]
 
     def create_vectorstore_parallel(self, documents):
         """Create embeddings with controlled memory usage"""
@@ -137,14 +137,24 @@ class RAGProcessor:
             'texts': doc_texts
         }
 
-    def retrieve_documents(self, vectorstore, query, k=3):  # Increased back to 3 for accuracy
+    def retrieve_documents(self, vectorstore, query, k=4):  # More docs for better accuracy
         query_embedding = self.embeddings.embed_query(query)
         query_embedding = np.array(query_embedding, dtype=np.float32).reshape(1, -1)
         
         similarities = cosine_similarity(query_embedding, vectorstore['embeddings'])[0]
         top_indices = np.argsort(similarities)[::-1][:k]
         
-        return [vectorstore['documents'][i] for i in top_indices]
+        # Filter for relevance
+        relevant_docs = []
+        for idx in top_indices:
+            if similarities[idx] > 0.25:  # Lower threshold for more docs
+                relevant_docs.append(vectorstore['documents'][idx])
+        
+        # Return at least 2 docs even if below threshold
+        if len(relevant_docs) < 2:
+            return [vectorstore['documents'][i] for i in top_indices[:2]]
+        
+        return relevant_docs
 
     def run_rag(self, doc_url, questions):
         # Step 1: Download and load document
@@ -163,7 +173,7 @@ class RAGProcessor:
             context = "\n\n".join([d.page_content for d in rel_docs])
             
             # Concise prompt for shorter answers
-            prompt = f"""Based on the document context, think and analyze the whole context and the question deeply, then provide a direct, concise answer. Use only 1-3 sentences maximum.
+            prompt = f"""Based on the document context, provide a direct, concise answer. Use only 1-2 sentences maximum.
 
 Context: {context}
 
