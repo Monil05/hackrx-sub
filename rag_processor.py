@@ -48,6 +48,18 @@ class RAGProcessor:
         for old, new in replacements.items():
             text = text.replace(old, new)
         
+        # Remove unwanted phrases
+        unwanted_phrases = [
+            '"Answer is not included"',
+            "'Answer is not included'",
+            "Answer is not included",
+            "\\\"Answer is not included\\\"",
+            '\\"Answer is not included\\"'
+        ]
+        
+        for phrase in unwanted_phrases:
+            text = text.replace(phrase, "")
+        
         # Remove markdown formatting
         text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)  # Bold
         text = re.sub(r'\*([^*]+)\*', r'\1', text)      # Italic
@@ -61,9 +73,14 @@ class RAGProcessor:
         text = re.sub(r'\n', ' ', text)                # Single newlines
         text = re.sub(r'\s{2,}', ' ', text)            # Multiple spaces
         
-        # Remove backslashes and clean up
+        # Remove backslashes and escape sequences
         text = text.replace('\\', '')
+        text = text.replace('\\"', '"')
+        text = text.replace("\\'", "'")
+        
+        # Clean up extra punctuation and weird characters
         text = re.sub(r'[^\w\s\.\,\;\:\!\?\-\'\"]', ' ', text)
+        text = re.sub(r'\s{2,}', ' ', text)  # Final space cleanup
         
         return text.strip()
 
@@ -95,15 +112,24 @@ class RAGProcessor:
         return [Document(page_content=chunk.strip()) for chunk in docs if len(chunk.strip()) > 30]
 
     def create_vectorstore_parallel(self, documents):
-        """Create embeddings in parallel for speed"""
+        """Create embeddings with controlled memory usage"""
         doc_texts = [doc.page_content for doc in documents]
         
-        def get_embedding(text):
-            return self.embeddings.embed_query(text)
+        # Process in smaller batches to control memory
+        batch_size = 5  # Smaller batches
+        doc_embeddings = []
         
-        # Use ThreadPoolExecutor for parallel embedding creation
-        with ThreadPoolExecutor(max_workers=3) as executor:  # Limited workers to control memory
-            doc_embeddings = list(executor.map(get_embedding, doc_texts))
+        for i in range(0, len(doc_texts), batch_size):
+            batch = doc_texts[i:i+batch_size]
+            
+            # Single-threaded within batch for memory safety
+            batch_embeddings = []
+            for text in batch:
+                embedding = self.embeddings.embed_query(text)
+                batch_embeddings.append(embedding)
+            
+            doc_embeddings.extend(batch_embeddings)
+            gc.collect()  # Clean up after each batch
         
         return {
             'documents': documents,
@@ -111,7 +137,7 @@ class RAGProcessor:
             'texts': doc_texts
         }
 
-    def retrieve_documents(self, vectorstore, query, k=2):
+    def retrieve_documents(self, vectorstore, query, k=3):  # Increased back to 3 for accuracy
         query_embedding = self.embeddings.embed_query(query)
         query_embedding = np.array(query_embedding, dtype=np.float32).reshape(1, -1)
         
@@ -130,13 +156,14 @@ class RAGProcessor:
         # Step 3: Create embeddings in parallel
         vectorstore = self.create_vectorstore_parallel(docs)
 
-        # Step 4: Process questions in parallel
-        def process_question(q):
+        # Step 4: Process questions sequentially for memory safety
+        answers = []
+        for q in questions:
             rel_docs = self.retrieve_documents(vectorstore, q, k=2)
             context = "\n\n".join([d.page_content for d in rel_docs])
             
             # Concise prompt for shorter answers
-            prompt = f"""Based on the document context, provide a direct, concise answer. Use only 1-2 sentences maximum.
+            prompt = f"""Based on the document context, think and analyze the whole context and the question deeply, then provide a direct, concise answer. Use only 1-3 sentences maximum.
 
 Context: {context}
 
@@ -145,11 +172,10 @@ Question: {q}
 Concise answer:"""
             
             res = self.llm.predict(prompt)
-            return self.clean_text(res)
-        
-        # Process all questions in parallel
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            answers = list(executor.map(process_question, questions))
+            answers.append(self.clean_text(res))
+            
+            # Memory cleanup after each question
+            gc.collect()
         
         # Cleanup
         del vectorstore
